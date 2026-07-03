@@ -1,0 +1,18 @@
+planner:
+  grid_resolution: 50.0
+  max_search_nodes: 25000
+  smoothing_iterations: 4
+  dynamic_obstacle_prediction_seconds: [60, 120, 180]
+constraints:
+  max_speed: 3.0
+  min_obstacle_distance: 50.0
+  max_turn_angle_deg: 30.0
+  min_turning_radius: 30.0
+  sweep_width: 50.0
+  coverage_required: 0.95
+llm:
+  model: gpt-5.5
+  timeout_seconds: 20
+  max_retries: 2
+memory:
+  window_size: 5

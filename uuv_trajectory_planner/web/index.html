@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>UUV轨迹规划 MVP</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <h1>UUV轨迹规划</h1>
+            <p id="statusText">本地对话规划入口</p>
+          </div>
+          <div class="actions">
+            <button id="detectionBtn" type="button">探测示例</button>
+            <button id="generalBtn" type="button">点到点示例</button>
+            <button id="coverageBtn" type="button">覆盖示例</button>
+          </div>
+        </header>
+
+        <section class="main-grid">
+          <div class="left-stack">
+            <section class="detection-panel">
+              <div class="panel-title">
+                <h2>探测语义</h2>
+                <span id="parserBadge">待解析</span>
+              </div>
+              <form id="detectionForm" class="detection-form">
+                <textarea id="detectionInput" rows="5" spellcheck="false"></textarea>
+                <div class="parser-grid">
+                  <label>UUV X<input id="uuvX" type="number" step="10" value="0" /></label>
+                  <label>UUV Y<input id="uuvY" type="number" step="10" value="0" /></label>
+                  <label>UUV Z<input id="uuvZ" type="number" step="5" value="-50" /></label>
+                  <label>默认距离 m<input id="detectionRange" type="number" min="1" step="50" value="500" /></label>
+                  <label>默认深度 m<input id="detectionDepth" type="number" step="5" value="-50" /></label>
+                </div>
+                <div class="parser-actions">
+                  <button id="parseDetectionBtn" type="button">解析</button>
+                  <button id="planDetectionBtn" type="button" class="primary">解析并规划</button>
+                </div>
+              </form>
+            </section>
+
+            <section class="chat-panel">
+              <div class="panel-title">
+                <h2>任务对话</h2>
+                <span id="scenarioBadge">待规划</span>
+              </div>
+              <div id="chatLog" class="chat-log"></div>
+              <form id="chatForm" class="composer">
+                <textarea id="messageInput" rows="4" spellcheck="false"></textarea>
+                <button id="sendBtn" type="submit" class="primary">发送</button>
+              </form>
+            </section>
+
+            <section class="obstacle-panel">
+              <div class="panel-title">
+                <h2>障碍物</h2>
+                <button id="addObstacleBtn" type="button">添加</button>
+              </div>
+              <div class="safety-control">
+                <label for="safetyDistance">安全距离 m</label>
+                <input id="safetyDistance" type="number" min="0" step="5" value="50" />
+              </div>
+              <div id="obstacleList" class="obstacle-list"></div>
+            </section>
+
+            <section class="bait-panel">
+              <div class="panel-title">
+                <h2>饵物</h2>
+                <button id="addBaitBtn" type="button">添加</button>
+              </div>
+              <div id="baitList" class="bait-list"></div>
+            </section>
+          </div>
+
+          <section class="visual-panel">
+            <div class="metric-strip">
+              <div>
+                <span>状态</span>
+                <strong id="metricStatus">待运行</strong>
+              </div>
+              <div>
+                <span>航程</span>
+                <strong id="metricDistance">--</strong>
+              </div>
+              <div>
+                <span>置信度</span>
+                <strong id="metricConfidence">--</strong>
+              </div>
+              <div>
+                <span>轨迹点</span>
+                <strong id="metricPoints">--</strong>
+              </div>
+            </div>
+            <div class="gif-stage">
+              <img id="trajectoryGif" alt="轨迹动画" />
+              <div id="emptyState">发送任务后生成轨迹动图</div>
+            </div>
+          </section>
+        </section>
+
+        <section class="detail-grid">
+          <section class="result-panel">
+            <h2>推理链</h2>
+            <p id="reasoningText">等待规划。</p>
+          </section>
+          <section class="result-panel">
+            <h2>结构化结果</h2>
+            <pre id="decisionOutput">{}</pre>
+          </section>
+        </section>
+      </section>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>
