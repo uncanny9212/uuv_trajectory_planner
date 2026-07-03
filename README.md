@@ -4,6 +4,8 @@
 
 - 通用点到点轨迹规划：直线路径检查、A* 栅格避障、路径平滑、约束验证。
 - 区域覆盖规划：500m x 500m 等简单多边形区域的往返式扫描覆盖。
+- 被动方位滚动规划：根据方位历史、UUV状态和约束，每次输出下一步动作。
+- 抵近仿真测试：用真实目标位置生成方位反馈，闭环验证滚动规划行为。
 
 系统按 ReAct 风格组织流程：
 
@@ -61,13 +63,49 @@ http://127.0.0.1:8000
 python3 -m unittest discover -s tests
 ```
 
-测试覆盖 5 个验收场景：
+测试覆盖核心验收场景：
 
 - 无障碍物简单路径
 - 单障碍物避障
 - 多障碍物复杂避障
 - 动态障碍物预测避障
 - 矩形区域全覆盖扫描
+- 方位滚动规划的航向修正、抵近环绕、低电量放弃和观测不足等待
+
+## 滚动规划模块
+
+`uuv_trajectory_planner.core.rolling_planner` 面向被动方位历程输入，不一次性生成完整轨迹，而是输出下一步决策：
+
+```python
+import json
+
+from uuv_trajectory_planner.core.rolling_planner import plan_rolling
+
+with open("examples/rolling_scenario.json", "r", encoding="utf-8") as handle:
+    payload = json.load(handle)
+
+decision = plan_rolling(payload)
+print(json.dumps(decision, ensure_ascii=False, indent=2))
+```
+
+## 仿真测试模块
+
+`uuv_trajectory_planner.simulation` 提供真实目标位置下的闭环仿真。主流程是输入一个或多个真实饵物坐标，再输入当前方位对话；仿真器根据真实坐标生成后续测角反馈，滚动规划器逐轮调整航向，发现目标后绕航 5 圈。预置单场景和批量测试也保留用于回归验证：
+
+```python
+from uuv_trajectory_planner.simulation import SimulationRunner, scenario_by_name
+
+runner = SimulationRunner()
+closed_loop = runner.run_interactive(
+    {
+        "target_positions_text": "(800,300,-50)\n(600,-400,-50)",
+        "bearing_text": "当前方位北偏东70度，抵近侦察",
+        "orbit_turns": 5,
+    }
+)
+result = runner.run(scenario_by_name("右前方"))
+report = runner.run_batch()
+```
 
 测试输出位于 `test_outputs/`：
 
@@ -91,12 +129,18 @@ uuv_project/
     ├── core/
     │   ├── llm_client.py
     │   ├── memory_manager.py
+    │   ├── rolling_planner.py
     │   └── react_engine.py
     ├── models/
     ├── planners/
     │   ├── general_planner.py
     │   ├── coverage_planner.py
     │   └── utils.py
+    ├── simulation/
+    │   ├── simulator.py
+    │   ├── runner.py
+    │   ├── scenarios.py
+    │   └── visualization.py
     ├── web/
     ├── web_server.py
     ├── reporting.py

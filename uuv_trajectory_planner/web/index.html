@@ -3,118 +3,82 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>UUV轨迹规划 MVP</title>
-    <link rel="stylesheet" href="/styles.css" />
+    <title>UUV闭环仿真</title>
+    <link rel="stylesheet" href="/styles.css?v=pilot-feedback" />
   </head>
   <body>
     <main class="app-shell">
       <section class="workspace">
         <header class="topbar">
           <div>
-            <h1>UUV轨迹规划</h1>
-            <p id="statusText">本地对话规划入口</p>
+            <h1>UUV闭环仿真</h1>
+            <p id="statusText">坐标系 0～2000，分辨率 1m，起点 (0,0)</p>
           </div>
-          <div class="actions">
-            <button id="detectionBtn" type="button">探测示例</button>
-            <button id="generalBtn" type="button">点到点示例</button>
-            <button id="coverageBtn" type="button">覆盖示例</button>
-          </div>
+          <span id="simulationBadge">待运行</span>
         </header>
 
         <section class="main-grid">
-          <div class="left-stack">
-            <section class="detection-panel">
-              <div class="panel-title">
-                <h2>探测语义</h2>
-                <span id="parserBadge">待解析</span>
-              </div>
-              <form id="detectionForm" class="detection-form">
-                <textarea id="detectionInput" rows="5" spellcheck="false"></textarea>
-                <div class="parser-grid">
-                  <label>UUV X<input id="uuvX" type="number" step="10" value="0" /></label>
-                  <label>UUV Y<input id="uuvY" type="number" step="10" value="0" /></label>
-                  <label>UUV Z<input id="uuvZ" type="number" step="5" value="-50" /></label>
-                  <label>默认距离 m<input id="detectionRange" type="number" min="1" step="50" value="500" /></label>
-                  <label>默认深度 m<input id="detectionDepth" type="number" step="5" value="-50" /></label>
-                </div>
-                <div class="parser-actions">
-                  <button id="parseDetectionBtn" type="button">解析</button>
-                  <button id="planDetectionBtn" type="button" class="primary">解析并规划</button>
-                </div>
-              </form>
-            </section>
-
-            <section class="chat-panel">
-              <div class="panel-title">
-                <h2>任务对话</h2>
-                <span id="scenarioBadge">待规划</span>
-              </div>
-              <div id="chatLog" class="chat-log"></div>
-              <form id="chatForm" class="composer">
-                <textarea id="messageInput" rows="4" spellcheck="false"></textarea>
-                <button id="sendBtn" type="submit" class="primary">发送</button>
-              </form>
-            </section>
-
-            <section class="obstacle-panel">
-              <div class="panel-title">
-                <h2>障碍物</h2>
-                <button id="addObstacleBtn" type="button">添加</button>
-              </div>
-              <div class="safety-control">
-                <label for="safetyDistance">安全距离 m</label>
-                <input id="safetyDistance" type="number" min="0" step="5" value="50" />
-              </div>
-              <div id="obstacleList" class="obstacle-list"></div>
-            </section>
-
-            <section class="bait-panel">
-              <div class="panel-title">
-                <h2>饵物</h2>
-                <button id="addBaitBtn" type="button">添加</button>
-              </div>
-              <div id="baitList" class="bait-list"></div>
-            </section>
-          </div>
-
-          <section class="visual-panel">
-            <div class="metric-strip">
-              <div>
-                <span>状态</span>
-                <strong id="metricStatus">待运行</strong>
-              </div>
-              <div>
-                <span>航程</span>
-                <strong id="metricDistance">--</strong>
-              </div>
-              <div>
-                <span>置信度</span>
-                <strong id="metricConfidence">--</strong>
-              </div>
-              <div>
-                <span>轨迹点</span>
-                <strong id="metricPoints">--</strong>
-              </div>
+          <section class="input-panel">
+            <div class="panel-title">
+              <h2>参数设置</h2>
             </div>
-            <div class="gif-stage">
-              <img id="trajectoryGif" alt="轨迹动画" />
-              <div id="emptyState">发送任务后生成轨迹动图</div>
+            <div class="input-form">
+              <section class="field-group">
+                <div class="section-title">
+                  <h3>真实饵物坐标</h3>
+                  <button id="addTargetBtn" type="button">添加目标</button>
+                </div>
+                <div id="targetRows" class="target-list"></div>
+              </section>
+
+              <section class="field-group">
+                <label for="discoveryRangeInput">发现距离 m</label>
+                <input id="discoveryRangeInput" type="number" min="1" step="1" value="50" />
+              </section>
+
+              <section class="field-group">
+                <label for="dialogInput">对话输入</label>
+                <textarea id="dialogInput" rows="6" spellcheck="false">根据探测到的方位，逐目标抵近侦察。</textarea>
+              </section>
+
+              <button id="runSimulationBtn" type="button" class="primary">开始仿真</button>
             </div>
           </section>
-        </section>
 
-        <section class="detail-grid">
-          <section class="result-panel">
-            <h2>推理链</h2>
-            <p id="reasoningText">等待规划。</p>
-          </section>
-          <section class="result-panel">
-            <h2>结构化结果</h2>
-            <pre id="decisionOutput">{}</pre>
+          <section class="output-grid">
+            <section class="output-panel trajectory-panel">
+              <div class="panel-title">
+                <h2>平面轨迹动画</h2>
+              </div>
+              <canvas id="trajectoryCanvas"></canvas>
+            </section>
+
+            <section class="output-panel bearing-panel">
+              <div class="panel-title">
+                <h2>多次探测角度记录</h2>
+              </div>
+              <canvas id="bearingCanvas"></canvas>
+            </section>
+
+            <section class="output-panel agent-panel">
+              <div class="panel-title">
+                <h2>Agent思考与执行</h2>
+              </div>
+              <div class="agent-output-grid">
+                <section class="agent-column">
+                  <h3>思考过程</h3>
+                  <pre id="agentThoughts">等待仿真。</pre>
+                </section>
+                <section class="agent-column">
+                  <h3>驾驶员反馈</h3>
+                  <pre id="pilotReport">等待仿真。</pre>
+                </section>
+              </div>
+            </section>
           </section>
         </section>
       </section>
     </main>
-    <script src="/app.js"></script>
+    <script src="/app.js?v=depth-feedback"></script>
   </body>
 </html>

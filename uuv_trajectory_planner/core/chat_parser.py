@@ -60,6 +60,9 @@ def _apply_coverage_details(payload: Dict[str, Any], text: str) -> None:
 
 
 def _apply_general_details(payload: Dict[str, Any], text: str) -> None:
+    payload.setdefault("environment", {})["obstacles"] = []
+    payload.setdefault("environment", {})["baits"] = []
+
     pairs = _coordinate_pairs(text)
     if pairs:
         start = pairs[0]

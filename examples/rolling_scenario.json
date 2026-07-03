@@ -1,0 +1,24 @@
+{
+  "bearing_history": [
+    {"angle": 30, "timestamp": "10:00:00"},
+    {"angle": 32, "timestamp": "10:00:30"},
+    {"angle": 35, "timestamp": "10:01:00"},
+    {"angle": 38, "timestamp": "10:01:30"},
+    {"angle": 42, "timestamp": "10:02:00"}
+  ],
+  "uuv_state": {
+    "position": [0, 0, -50],
+    "heading": 30,
+    "speed": 2.0,
+    "battery": 0.8
+  },
+  "estimated_range": 800,
+  "constraints": {
+    "approach_range": 100,
+    "orbit_turns": 2,
+    "orbit_radius": 10,
+    "max_iterations": 50,
+    "default_step": 300
+  },
+  "mission_context": "抵近侦察"
+}

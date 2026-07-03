@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 
 from uuv_trajectory_planner.main import sample_payload
-from uuv_trajectory_planner.web_server import json_safe, validate_bait_clearance
+from uuv_trajectory_planner.web_server import json_safe, rolling_preview_from_text, validate_bait_clearance
 
 
 class TestWebValidation(unittest.TestCase):
@@ -40,6 +40,24 @@ class TestWebValidation(unittest.TestCase):
         payload = {"clearance": float("inf"), "nested": [1.0, float("-inf"), float("nan")]}
 
         self.assertEqual(json_safe(payload), {"clearance": None, "nested": [1.0, None, None]})
+
+    def test_bearing_without_range_uses_rolling_planner(self) -> None:
+        result = rolling_preview_from_text("有1个目标在北偏东20度。抵近侦察")
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result["mode"], "rolling")
+        self.assertEqual(result["rolling"]["detected_bearing"], 20.0)
+        decisions = [item["decision"]["decision"] for item in result["rolling"]["iterations"]]
+        self.assertEqual(decisions[0], "wait")
+        self.assertIn("adjust_heading", decisions)
+        self.assertEqual(decisions[-1], "orbit")
+        self.assertNotIn("target_position", result["payload"])
+
+    def test_bearing_with_explicit_range_uses_standard_detection_path(self) -> None:
+        result = rolling_preview_from_text("目标在北偏东20度，距离500米。抵近侦察")
+
+        self.assertIsNone(result)
 
 
 if __name__ == "__main__":
