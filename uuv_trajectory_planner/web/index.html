@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>UUV闭环仿真</title>
-    <link rel="stylesheet" href="/styles.css?v=pilot-feedback" />
+    <link rel="stylesheet" href="/styles.css?v=trajectory-scroll-fix" />
   </head>
   <body>
     <main class="app-shell">
@@ -19,6 +19,28 @@
 
         <section class="main-grid">
           <section class="input-panel">
+            <section class="field-group api-section">
+              <div class="section-title">
+                <h3>API连接</h3>
+                <span class="mode-note">留空则本地模式</span>
+              </div>
+              <div class="api-config">
+                <label for="apiBaseUrlInput">API地址<input id="apiBaseUrlInput" type="url" placeholder="https://api.openai.com/v1" /></label>
+                <label for="apiKeyInput">API_KEY<input id="apiKeyInput" type="password" autocomplete="off" placeholder="粘贴实际密钥，不是网页链接" /></label>
+              </div>
+            </section>
+
+            <section class="field-group agent-chat-section">
+              <label for="agentChatInput">Agent对话</label>
+              <div class="chat-box">
+                <div id="agentChatMessages" class="chat-messages" aria-live="polite"></div>
+                <div class="chat-compose">
+                  <textarea id="agentChatInput" rows="3" spellcheck="false">根据探测到的方位，逐目标抵近侦察。</textarea>
+                  <button id="sendAgentMessageBtn" type="button">发送</button>
+                </div>
+              </div>
+            </section>
+
             <div class="panel-title">
               <h2>参数设置</h2>
             </div>
@@ -37,8 +59,8 @@
               </section>
 
               <section class="field-group">
-                <label for="dialogInput">对话输入</label>
-                <textarea id="dialogInput" rows="6" spellcheck="false">根据探测到的方位，逐目标抵近侦察。</textarea>
+                <label for="sonarTriggerRangeInput">声呐触发距离 m</label>
+                <input id="sonarTriggerRangeInput" type="number" min="1" step="1" value="15" />
               </section>
 
               <button id="runSimulationBtn" type="button" class="primary">开始仿真</button>
@@ -60,6 +82,17 @@
               <canvas id="bearingCanvas"></canvas>
             </section>
 
+            <section class="output-panel sonar-panel">
+              <div class="panel-title">
+                <h2>成像声呐</h2>
+                <span id="sonarStatusBadge" class="sonar-status">待机</span>
+              </div>
+              <div class="sonar-display">
+                <canvas id="sonarCanvas"></canvas>
+                <div id="sonarMetadata" class="sonar-metadata">等待进入成像距离</div>
+              </div>
+            </section>
+
             <section class="output-panel agent-panel">
               <div class="panel-title">
                 <h2>Agent思考与执行</h2>
@@ -67,11 +100,11 @@
               <div class="agent-output-grid">
                 <section class="agent-column">
                   <h3>思考过程</h3>
-                  <pre id="agentThoughts">等待仿真。</pre>
+                  <pre id="agentThoughts" tabindex="0" aria-label="Agent思考过程">等待仿真。</pre>
                 </section>
                 <section class="agent-column">
                   <h3>驾驶员反馈</h3>
-                  <pre id="pilotReport">等待仿真。</pre>
+                  <pre id="pilotReport" tabindex="0" aria-label="驾驶员反馈">等待仿真。</pre>
                 </section>
               </div>
             </section>
@@ -79,6 +112,19 @@
         </section>
       </section>
     </main>
-    <script src="/app.js?v=depth-feedback"></script>
+    <div id="authorizationModal" class="modal-overlay" hidden>
+      <section class="modal-panel" role="dialog" aria-modal="true" aria-labelledby="authorizationTitle">
+        <div class="modal-title">
+          <h2 id="authorizationTitle">授权请求</h2>
+        </div>
+        <p id="authorizationMessage"></p>
+        <div class="modal-actions">
+          <button id="authorizationHoldBtn" type="button">保持待机</button>
+          <button id="authorizationApproveBtn" type="button" class="primary">授权通过</button>
+          <button id="authorizationCloseBtn" type="button" hidden>关闭</button>
+        </div>
+      </section>
+    </div>
+    <script src="/app.js?v=trajectory-scroll-fix"></script>
   </body>
 </html>

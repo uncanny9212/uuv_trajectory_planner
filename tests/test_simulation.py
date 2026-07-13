@@ -95,7 +95,7 @@ class TestSimulation(unittest.TestCase):
     def test_interactive_simulation_visits_multiple_targets_in_bearing_order(self) -> None:
         result = SimulationRunner().run_interactive(
             {
-                "target_positions": [(800, 300, -50), (300, 800, -50)],
+                "target_positions": [(800, 300, -8), (300, 800, -8)],
                 "bearing_text": "目标1在北偏东70度，目标2在北偏东21度。分别抵近侦察",
                 "default_step": 180,
                 "approach_range": 50,
@@ -109,13 +109,73 @@ class TestSimulation(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["target_route"], [0, 1])
         self.assertEqual(result["completed_target_count"], 2)
-        self.assertEqual(result["orbit_turns_completed"], 6)
+        self.assertEqual(result["orbit_turns_completed"], 2)
         self.assertEqual([run["status"] for run in result["target_runs"]], ["success", "success"])
-        self.assertEqual([run["orbit_turns_completed"] for run in result["target_runs"]], [3, 3])
+        self.assertEqual([run["orbit_turns_completed"] for run in result["target_runs"]], [1, 1])
         self.assertEqual(
             [(segment["kind"], segment["target_index"]) for segment in result["trajectory_segments"]],
-            [("approach", 0), ("orbit", 0), ("approach", 1), ("orbit", 1)],
+            [("approach", 0), ("orbit", 0), ("approach", 1), ("orbit", 1), ("post_mission", 1)],
         )
+        self.assertEqual(result["post_mission_decision"]["action"], "return_to_base")
+        self.assertEqual(result["post_mission_decision"]["decision_basis"], "target_depth")
+        self.assertGreater(result["post_mission_distance"], 0.0)
+
+    def test_post_mission_decision_uses_confirmed_depth_not_dialog_keywords(self) -> None:
+        runner = SimulationRunner()
+
+        shallow = runner.run_interactive(
+            {
+                "target_positions": [(800, 300, -8)],
+                "bearing_text": "目标在北偏东70度。侦察完成后召集其他UUV并准备打击。",
+                "default_step": 180,
+                "approach_range": 50,
+                "bearing_noise_deg": 0.0,
+                "orbit_turns": 1,
+                "orbit_radius": 10,
+                "max_iterations": 100,
+            }
+        )
+        medium = runner.run_interactive(
+            {
+                "target_positions": [(800, 300, -20)],
+                "bearing_text": "目标在北偏东70度。侦察完成后返航。",
+                "default_step": 180,
+                "approach_range": 50,
+                "bearing_noise_deg": 0.0,
+                "orbit_turns": 1,
+                "orbit_radius": 10,
+                "max_iterations": 100,
+            }
+        )
+        deep = runner.run_interactive(
+            {
+                "target_positions": [(800, 300, -50)],
+                "bearing_text": "目标在北偏东70度。侦察完成后返航。",
+                "default_step": 180,
+                "approach_range": 50,
+                "bearing_noise_deg": 0.0,
+                "orbit_turns": 1,
+                "orbit_radius": 10,
+                "max_iterations": 100,
+            }
+        )
+        ultra_deep = runner.run_interactive(
+            {
+                "target_positions": [(800, 300, -80)],
+                "bearing_text": "目标在北偏东70度。侦察完成后返航。",
+                "default_step": 180,
+                "approach_range": 50,
+                "bearing_noise_deg": 0.0,
+                "orbit_turns": 1,
+                "orbit_radius": 10,
+                "max_iterations": 100,
+            }
+        )
+
+        self.assertEqual(shallow["post_mission_decision"]["action"], "return_to_base")
+        self.assertEqual(medium["post_mission_decision"]["action"], "revisit_target")
+        self.assertEqual(deep["post_mission_decision"]["action"], "call_uuv_support")
+        self.assertEqual(ultra_deep["post_mission_decision"]["action"], "simulated_strike_request")
 
     def test_interactive_simulation_flags_false_bearing_feedback(self) -> None:
         result = SimulationRunner().run_interactive(

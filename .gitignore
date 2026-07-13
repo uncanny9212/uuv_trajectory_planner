@@ -7,3 +7,5 @@ __pycache__/
 htmlcov/
 test_outputs/
 .cache/
+.idea/
+uuv_detect_analysis/

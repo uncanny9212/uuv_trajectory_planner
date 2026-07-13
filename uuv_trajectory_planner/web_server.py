@@ -14,6 +14,7 @@ from typing import Any, Dict, Optional, Sequence
 from uuv_trajectory_planner.animation import decision_gif_data_url
 from uuv_trajectory_planner.core.chat_parser import payload_from_message
 from uuv_trajectory_planner.core.detection_parser import DetectionParser
+from uuv_trajectory_planner.core.llm_client import LLMClient
 from uuv_trajectory_planner.core.react_engine import ReActEngine
 from uuv_trajectory_planner.core.rolling_planner import RollingPlanner
 from uuv_trajectory_planner.models.situation_awareness import SituationAwareness
@@ -260,6 +261,7 @@ class PlannerWebHandler(BaseHTTPRequestHandler):
 
     engine = ReActEngine()
     simulation_runner = SimulationRunner()
+    llm_client = LLMClient(timeout_seconds=6)
 
     def do_HEAD(self) -> None:
         """Support lightweight health checks for the static entry."""
@@ -315,6 +317,9 @@ class PlannerWebHandler(BaseHTTPRequestHandler):
         if self.path == "/api/chat-plan":
             self._handle_chat_plan()
             return
+        if self.path == "/api/agent-chat":
+            self._handle_agent_chat()
+            return
         if self.path == "/api/detection-parse":
             self._handle_detection_parse()
             return
@@ -330,7 +335,7 @@ class PlannerWebHandler(BaseHTTPRequestHandler):
         if self.path == "/api/simulation/batch":
             self._handle_simulation_batch()
             return
-        self._send_error(HTTPStatus.NOT_FOUND, "Not found")
+        self._send_error(HTTPStatus.NOT_FOUND, f"Not found: {self.path}")
 
     def _handle_plan(self) -> None:
         try:
@@ -347,6 +352,9 @@ class PlannerWebHandler(BaseHTTPRequestHandler):
             body = self._read_json_body()
             if not isinstance(body, dict):
                 raise ValueError("Request body must be a JSON object")
+            if isinstance(body.get("messages"), list):
+                self._send_json({"mode": "agent_chat", **self._agent_chat_response(body)})
+                return
             message = str(body.get("message", "")).strip()
             if not message:
                 raise ValueError("请输入任务描述")
@@ -363,6 +371,32 @@ class PlannerWebHandler(BaseHTTPRequestHandler):
             self._send_json({"input": message, "payload": payload, "decision": decision.to_dict(), "animation_url": gif_url})
         except Exception as exc:  # pylint: disable=broad-exception-caught
             self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+
+    def _handle_agent_chat(self) -> None:
+        try:
+            body = self._read_json_body()
+            if not isinstance(body, dict):
+                raise ValueError("Request body must be a JSON object")
+            self._send_json({"mode": "agent_chat", **self._agent_chat_response(body)})
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+
+    def _agent_chat_response(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        messages = body.get("messages", [])
+        if not isinstance(messages, list) or not messages:
+            raise ValueError("请输入对话内容")
+        cleaned_messages = []
+        for item in messages[-20:]:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role", "")).strip()
+            content = str(item.get("content", "")).strip()
+            if role in ("user", "assistant") and content:
+                cleaned_messages.append({"role": role, "content": content})
+        if not cleaned_messages:
+            raise ValueError("请输入有效对话内容")
+        context = body.get("context", {}) if isinstance(body.get("context", {}), dict) else {}
+        return self.llm_client.chat(cleaned_messages, context)
 
     def _handle_detection_parse(self) -> None:
         try:
@@ -522,6 +556,7 @@ class PlannerWebHandler(BaseHTTPRequestHandler):
         if self.path not in (
             "/api/plan",
             "/api/chat-plan",
+            "/api/agent-chat",
             "/api/detection-parse",
             "/api/detection-plan",
             "/api/simulation/run",

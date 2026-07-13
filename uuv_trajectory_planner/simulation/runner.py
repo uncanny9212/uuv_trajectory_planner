@@ -8,6 +8,8 @@ import re
 from typing import Any, Dict, List, Optional, Sequence
 
 from uuv_trajectory_planner.core.rolling_planner import RollingPlanner
+from uuv_trajectory_planner.core.sonar_recognizer import recognize_target
+from uuv_trajectory_planner.core.sonar_simulator import TARGET_TYPES, generate_sonar_image
 from uuv_trajectory_planner.simulation.scenarios import (
     DEFAULT_SIMULATION_CONSTRAINTS,
     SimulationScenario,
@@ -27,6 +29,13 @@ DEFAULT_INTERACTIVE_START: Vector3 = (0.0, 0.0, -50.0)
 DEFAULT_FALSE_BEARING_THRESHOLD_DEG = 25.0
 DEEP_TARGET_THRESHOLD_M = 10.0
 DEEP_TARGET_EXTRA_ORBIT_TURNS = 2
+POST_RETURN_DEPTH_M = 10.0
+POST_REVISIT_DEPTH_M = 30.0
+POST_SUPPORT_DEPTH_M = 60.0
+DEFAULT_SONAR_TRIGGER_RANGE_M = 15.0
+DEFAULT_SONAR_MAX_RANGE_M = 10.0
+DEFAULT_ENGAGEMENT_DEPTH_MIN_M = 0.0
+DEFAULT_ENGAGEMENT_DEPTH_MAX_M = 60.0
 
 
 class SimulationRunner:
@@ -168,6 +177,7 @@ class SimulationRunner:
         target_positions = parse_target_positions(
             payload.get("target_positions", payload.get("target_positions_text", []))
         )
+        target_profiles = self._target_profiles(payload, len(target_positions))
         start_position = self._interactive_start_position(payload)
         constraints = self._interactive_constraints(payload)
         initial_bearings = self._initial_bearings(payload)
@@ -194,6 +204,8 @@ class SimulationRunner:
         final_distance = 0.0
         status = "success"
         failure_reason = ""
+        post_mission_distance = 0.0
+        post_mission_decision: Optional[Dict[str, Any]] = None
 
         for route_position, target_index in enumerate(target_route, start=1):
             target = target_positions[target_index]
@@ -207,6 +219,7 @@ class SimulationRunner:
 
             leg = self._run_target_leg(
                 target_position=target,
+                target_profile=target_profiles[target_index],
                 start_position=current_position,
                 target_index=target_index,
                 target_sequence=route_position,
@@ -236,11 +249,26 @@ class SimulationRunner:
             if leg["status"] == "success":
                 completed_target_count += 1
                 continue
+            if leg["status"] == "excluded":
+                continue
             status = "failed"
             failure_reason = str(leg["failure_reason"])
             break
 
-        total_distance = approach_distance + orbit_distance
+        if status == "success":
+            post_mission_decision = self._post_mission_decision(
+                target_runs=target_runs,
+                bearing_assessments=bearing_assessments,
+                current_position=current_position,
+                start_position=start_position,
+                constraints=constraints,
+            )
+            post_segment = self._post_mission_segment(post_mission_decision, current_position, start_position, constraints)
+            if post_segment:
+                trajectory_segments.append(post_segment)
+                post_mission_distance = float(post_segment["distance"])
+
+        total_distance = approach_distance + orbit_distance + post_mission_distance
         path_efficiency = 1.0 if status == "success" else completed_target_count / max(1, len(target_route))
         active_target_index = target_route[0] if target_route else 0
         active_target = target_positions[active_target_index]
@@ -249,9 +277,16 @@ class SimulationRunner:
             "mode": "interactive",
             "status": status,
             "target_positions": [list(position) for position in target_positions],
+            "target_profiles": target_profiles,
             "target_route": target_route,
             "target_runs": target_runs,
+            "sonar_events": [
+                event
+                for run in target_runs
+                for event in run.get("sonar_events", [])
+            ],
             "completed_target_count": completed_target_count,
+            "excluded_target_count": sum(1 for run in target_runs if run.get("status") == "excluded"),
             "bearing_assessments": bearing_assessments,
             "false_information_detected": any(
                 item["status"] != "trusted" for item in bearing_assessments
@@ -276,6 +311,7 @@ class SimulationRunner:
             "discovered_iteration": target_runs[-1]["discovered_iteration"] if target_runs else None,
             "approach_distance": round(approach_distance, 3),
             "orbit_distance": round(orbit_distance, 3),
+            "post_mission_distance": round(post_mission_distance, 3),
             "total_distance": round(total_distance, 3),
             "final_distance": round(final_distance, 3),
             "path_efficiency": round(path_efficiency, 3),
@@ -287,6 +323,7 @@ class SimulationRunner:
             "orbit_turns_completed": sum(
                 int(run.get("orbit_turns_completed", 0)) for run in target_runs
             ),
+            "post_mission_decision": post_mission_decision,
             "failure_reason": failure_reason,
             "summary": self._interactive_summary(
                 status=status,
@@ -310,6 +347,7 @@ class SimulationRunner:
         self,
         *,
         target_position: Vector3,
+        target_profile: Dict[str, Any],
         start_position: Vector3,
         target_index: int,
         target_sequence: int,
@@ -355,6 +393,9 @@ class SimulationRunner:
         failure_reason = "达到最大迭代次数"
         discovered_iteration: Optional[int] = None
         false_information_reported = False
+        sonar_events: List[Dict[str, Any]] = []
+        sonar_recognition: Optional[Dict[str, Any]] = None
+        excluded_as_false_target = False
 
         if self._within_approach_range(initial_distance, approach_range):
             status = "success"
@@ -477,6 +518,26 @@ class SimulationRunner:
                 simulator.move(executed_heading, executed_distance)
 
             distance_after = simulator.distance_to_target()
+            sonar_event = self._sonar_event_if_available(
+                uuv_position=simulator.uuv_position,
+                target_position=target_position,
+                target_profile=target_profile,
+                constraints=constraints,
+                iteration=decision_iteration,
+                target_index=target_index,
+                target_sequence=target_sequence,
+            )
+            if sonar_event:
+                sonar_events.append(sonar_event)
+                if float(sonar_event.get("echo_strength", 0.0)) > 0.0:
+                    sonar_recognition = sonar_event["recognition"]
+                    decision = dict(decision)
+                    decision["sonar_recognition"] = sonar_recognition
+                    if self._should_exclude_by_sonar(sonar_recognition, sonar_event):
+                        status = "excluded"
+                        failure_reason = ""
+                        discovered_iteration = decision_iteration
+                        excluded_as_false_target = True
             target_discovered = self._within_approach_range(distance_after, approach_range)
             decisions.append(
                 self._decision_record(
@@ -493,10 +554,15 @@ class SimulationRunner:
                     feedback_note=feedback_note,
                     target_discovered=target_discovered,
                     discovered_position=target_position if target_discovered else None,
+                    sonar_recognition=sonar_recognition,
+                    target_excluded=excluded_as_false_target,
                 )
             )
 
             uuv_history.append(self._history_item(simulator, decision_iteration, target_index, target_sequence))
+
+            if excluded_as_false_target:
+                break
 
             if target_discovered:
                 status = "success"
@@ -517,6 +583,28 @@ class SimulationRunner:
 
         orbit_history: List[Dict[str, Any]] = []
         orbit_distance = 0.0
+        if status == "success" and sonar_recognition is None:
+            sonar_event = self._sonar_event_for_inspection(
+                current_position=simulator.uuv_position,
+                target_position=target_position,
+                target_profile=target_profile,
+                constraints=constraints,
+                iteration=discovered_iteration or global_start_iteration + len(decisions),
+                target_index=target_index,
+                target_sequence=target_sequence,
+            )
+            if sonar_event:
+                sonar_events.append(sonar_event)
+                sonar_recognition = sonar_event["recognition"]
+                if decisions:
+                    decisions[-1]["sonar_recognition"] = sonar_recognition
+                if self._should_exclude_by_sonar(sonar_recognition, sonar_event):
+                    status = "excluded"
+                    excluded_as_false_target = True
+                    failure_reason = ""
+                    if decisions:
+                        decisions[-1]["target_excluded"] = True
+
         if status == "success" and orbit_turns > 0:
             orbit_history, orbit_distance = self._orbit_history(
                 simulator,
@@ -567,6 +655,10 @@ class SimulationRunner:
                 "target_sequence": target_sequence,
                 "target_position": list(target_position),
                 "target_depth": round(self._target_depth(target_position), 3),
+                "target_type_truth": target_profile["target_type"],
+                "target_heading_deg": round(float(target_profile["target_heading_deg"]), 3),
+                "is_blue_target": bool(target_profile["is_blue_target"]),
+                "iff_explicit": bool(target_profile.get("iff_explicit")),
                 "is_deep_target": is_deep_target,
                 "status": status,
                 "iterations": len(decisions),
@@ -575,9 +667,318 @@ class SimulationRunner:
                 "orbit_distance": round(orbit_distance, 3),
                 "final_distance": round(final_distance, 3),
                 "orbit_turns_completed": orbit_turns if status == "success" else 0,
+                "sonar_triggered": bool(sonar_events),
+                "sonar_events": sonar_events,
+                "sonar_recognition": sonar_recognition,
+                "excluded_as_false_target": excluded_as_false_target,
                 "failure_reason": failure_reason,
             },
         }
+
+    def _post_mission_decision(
+        self,
+        *,
+        target_runs: Sequence[Dict[str, Any]],
+        bearing_assessments: Sequence[Dict[str, Any]],
+        current_position: Vector3,
+        start_position: Vector3,
+        constraints: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        suspect_count = sum(1 for item in bearing_assessments if item.get("status") != "trusted")
+        deep_runs = [run for run in target_runs if run.get("is_deep_target")]
+        completed_runs = [run for run in target_runs if run.get("status") == "success"]
+        target_count = len(target_runs)
+        selected_run = self._post_mission_selected_target(target_runs)
+        selected_depth = float(selected_run.get("target_depth", 0.0)) if selected_run else 0.0
+        confidence = 0.55
+        confidence += 0.2 if completed_runs and len(completed_runs) == target_count else 0.0
+        confidence += 0.15 if suspect_count == 0 else -0.2
+        confidence += 0.1 if target_count > 1 else 0.0
+        confidence += min(0.1, selected_depth / 1000.0)
+        confidence = max(0.1, min(0.95, confidence))
+
+        reasons: List[str] = []
+        if not selected_run:
+            excluded_count = sum(1 for run in target_runs if run.get("status") == "excluded")
+            reasons.append(f"未保留真实目标，声呐已排除{excluded_count}个假目标")
+            return {
+                "action": "return_to_base",
+                "decision": "返航",
+                "confidence": 0.7 if excluded_count else 0.4,
+                "selected_target_index": None,
+                "selected_target_sequence": None,
+                "selected_target_position": None,
+                "current_position": [round(value, 3) for value in current_position],
+                "start_position": [round(value, 3) for value in start_position],
+                "requires_authorization": False,
+                "decision_basis": "sonar_exclusion",
+                "depth_policy": {
+                    "return_to_base_max_depth": POST_RETURN_DEPTH_M,
+                    "revisit_target_max_depth": POST_REVISIT_DEPTH_M,
+                    "call_uuv_support_max_depth": POST_SUPPORT_DEPTH_M,
+                },
+                "sonar_recognition": None,
+                "reasoning": "；".join(reasons),
+                "execution_summary": "声呐识别未确认真实目标，整理记录后返航。",
+            }
+        if target_count:
+            reasons.append(f"已确认{len(completed_runs)}/{target_count}个目标")
+            reasons.append(f"以最深目标作为后续处置对象，确认深度{selected_depth:.1f}m")
+        if deep_runs:
+            reasons.append(f"{len(deep_runs)}个目标深度超过{DEEP_TARGET_THRESHOLD_M:.0f}m")
+        if suspect_count:
+            reasons.append(f"{suspect_count}条方位信息曾被判为疑似虚假，仅用于降低置信度，不直接控制后续动作")
+
+        sonar_recognition = selected_run.get("sonar_recognition") if isinstance(selected_run.get("sonar_recognition"), dict) else None
+        is_red_neutral_target = bool(selected_run.get("iff_explicit")) and not bool(selected_run.get("is_blue_target"))
+        if is_red_neutral_target:
+            reasons.append("IFF已确认目标为红方/中立，禁止进入模拟打击或授权流程")
+            if sonar_recognition is not None:
+                sonar_recognition["post_mission_note"] = "IFF为红方/中立，仅允许跟踪、复核、协同或返航"
+        sonar_override = None if is_red_neutral_target else self._sonar_post_mission_override(selected_run, constraints)
+        if sonar_override:
+            action = sonar_override["action"]
+            decision_text = sonar_override["decision"]
+            reasons.append(sonar_override["reasoning"])
+            decision_basis = "sonar_value_depth_iff"
+        elif selected_depth <= POST_RETURN_DEPTH_M:
+            action = "return_to_base"
+            decision_text = "返航"
+            reasons.append(f"目标深度不超过{POST_RETURN_DEPTH_M:.0f}m，完成常规确认后返航")
+            decision_basis = "target_depth"
+        elif selected_depth <= POST_REVISIT_DEPTH_M:
+            action = "revisit_target"
+            decision_text = "返回二次查看目标"
+            reasons.append(f"目标深度位于{POST_RETURN_DEPTH_M:.0f}～{POST_REVISIT_DEPTH_M:.0f}m，单艇二次复核")
+            decision_basis = "target_depth"
+        elif selected_depth <= POST_SUPPORT_DEPTH_M:
+            action = "call_uuv_support"
+            decision_text = "召集其他UUV协同查看"
+            reasons.append(f"目标深度位于{POST_REVISIT_DEPTH_M:.0f}～{POST_SUPPORT_DEPTH_M:.0f}m，单艇信息不足，召集协同UUV")
+            decision_basis = "target_depth"
+        else:
+            if is_red_neutral_target:
+                action = "track_and_report"
+                decision_text = "持续跟踪并上报，不执行打击"
+                reasons.append(f"目标深度超过{POST_SUPPORT_DEPTH_M:.0f}m，但IFF约束禁止打击，改为持续跟踪上报")
+                decision_basis = "iff_constraint"
+            else:
+                action = "simulated_strike_request"
+                decision_text = "进入模拟打击待机并请求授权"
+                reasons.append(f"目标深度超过{POST_SUPPORT_DEPTH_M:.0f}m，判定为高风险深层目标，进入授权前模拟打击待机")
+                decision_basis = "target_depth"
+
+        if is_red_neutral_target and decision_basis == "target_depth":
+            decision_basis = "target_depth_iff"
+
+        target_position = selected_run.get("target_position") if selected_run else None
+        return {
+            "action": action,
+            "decision": decision_text,
+            "confidence": round(confidence, 3),
+            "selected_target_index": selected_run.get("target_index") if selected_run else None,
+            "selected_target_sequence": selected_run.get("target_sequence") if selected_run else None,
+            "selected_target_position": target_position,
+            "current_position": [round(value, 3) for value in current_position],
+            "start_position": [round(value, 3) for value in start_position],
+            "requires_authorization": action == "simulated_strike_request",
+            "decision_basis": decision_basis,
+            "depth_policy": {
+                "return_to_base_max_depth": POST_RETURN_DEPTH_M,
+                "revisit_target_max_depth": POST_REVISIT_DEPTH_M,
+                "call_uuv_support_max_depth": POST_SUPPORT_DEPTH_M,
+            },
+            "sonar_recognition": sonar_recognition,
+            "engagement_depth_envelope": [
+                constraints.get("engagement_depth_min", DEFAULT_ENGAGEMENT_DEPTH_MIN_M),
+                constraints.get("engagement_depth_max", DEFAULT_ENGAGEMENT_DEPTH_MAX_M),
+            ],
+            "reasoning": "；".join(reasons),
+            "execution_summary": self._post_mission_execution_text(action, selected_run, constraints),
+        }
+
+    def _sonar_post_mission_override(
+        self,
+        selected_run: Dict[str, Any],
+        constraints: Dict[str, Any],
+    ) -> Optional[Dict[str, str]]:
+        recognition = selected_run.get("sonar_recognition")
+        if not isinstance(recognition, dict):
+            return None
+        if not (recognition.get("is_blue_target") and recognition.get("is_high_value_target")):
+            target_type = str(recognition.get("target_type", "unknown"))
+            recognition["post_mission_note"] = f"目标类型确认：{target_type}（非打击目标或非蓝方），按深度策略处置"
+            return None
+        depth = abs(float(recognition.get("target_depth_m", -float(selected_run.get("target_depth", 0.0)))))
+        depth_min = float(constraints.get("engagement_depth_min", DEFAULT_ENGAGEMENT_DEPTH_MIN_M))
+        depth_max = float(constraints.get("engagement_depth_max", DEFAULT_ENGAGEMENT_DEPTH_MAX_M))
+        target_type = str(recognition.get("target_type", "unknown"))
+        if depth_min < depth <= depth_max:
+            return {
+                "action": "simulated_strike_request",
+                "decision": "进入模拟打击待机并请求授权",
+                "reasoning": (
+                    f"目标类型确认：{target_type}（敌方高价值），深度{depth:.1f}m在打击包线"
+                    f"({depth_min:.0f},{depth_max:.0f}]m内，进入模拟打击待机并请求授权"
+                ),
+            }
+        return {
+            "action": "track_and_report",
+            "decision": "跟踪上报，等待时机",
+            "reasoning": (
+                f"目标类型确认：{target_type}（敌方高价值），但深度{depth:.1f}m超出打击包线"
+                f"({depth_min:.0f},{depth_max:.0f}]m，改为跟踪上报"
+            ),
+        }
+
+    def _post_mission_selected_target(
+        self,
+        target_runs: Sequence[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        if target_runs:
+            eligible_runs = [run for run in target_runs if run.get("status") == "success" and not run.get("excluded_as_false_target")]
+            if not eligible_runs:
+                return {}
+            return dict(
+                max(
+                    eligible_runs,
+                    key=lambda run: (
+                        1 if run.get("is_deep_target") else 0,
+                        1 if (run.get("sonar_recognition") or {}).get("is_high_value_target") else 0,
+                        float(run.get("target_depth", 0.0)),
+                        int(run.get("target_sequence", 0)),
+                    ),
+                )
+            )
+        return {}
+
+    def _post_mission_execution_text(
+        self,
+        action: str,
+        selected_run: Dict[str, Any],
+        constraints: Dict[str, Any],
+    ) -> str:
+        target_label = f"目标{int(selected_run.get('target_index', 0)) + 1}" if selected_run else "目标"
+        if action == "return_to_base":
+            return "完成情报整理，沿安全航线返航。"
+        if action == "revisit_target":
+            return f"返回{target_label}附近二次查看，按发现距离外侧重新建立观测。"
+        if action == "call_uuv_support":
+            return f"在{target_label}附近建立会合等待区，广播协同查看请求。"
+        if action == "simulated_strike_request":
+            return f"进入{target_label}外侧待机点，保持目标标记并请求打击授权。"
+        if action == "track_and_report":
+            return f"保持跟踪{target_label}并上报识别结果，等待后续窗口。"
+        return "保持待命。"
+
+    def _post_mission_segment(
+        self,
+        decision: Optional[Dict[str, Any]],
+        current_position: Vector3,
+        start_position: Vector3,
+        constraints: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        if not decision:
+            return None
+        action = str(decision.get("action", "return_to_base"))
+        target = decision.get("selected_target_position")
+        points: List[List[float]]
+        if action == "return_to_base":
+            points = [list(current_position), list(start_position)]
+        elif action == "revisit_target" and isinstance(target, Sequence):
+            points = self._post_revisit_points(current_position, vector3(target), constraints)
+        elif action == "call_uuv_support" and isinstance(target, Sequence):
+            points = self._post_support_points(current_position, vector3(target), constraints)
+        elif action == "simulated_strike_request" and isinstance(target, Sequence):
+            points = self._post_strike_request_points(current_position, vector3(target), constraints)
+        elif action == "track_and_report" and isinstance(target, Sequence):
+            points = self._post_support_points(current_position, vector3(target), constraints)
+        else:
+            points = [list(current_position)]
+
+        distance = _polyline_distance(points)
+        return {
+            "kind": "post_mission",
+            "post_action": action,
+            "target_index": decision.get("selected_target_index"),
+            "target_sequence": decision.get("selected_target_sequence"),
+            "distance": round(distance, 3),
+            "points": [[round(value, 3) for value in point] for point in points],
+        }
+
+    def _post_revisit_points(
+        self,
+        current_position: Vector3,
+        target_position: Vector3,
+        constraints: Dict[str, Any],
+    ) -> List[List[float]]:
+        radius = max(float(constraints["approach_range"]) + 20.0, float(constraints["orbit_radius"]) * 3.0, 80.0)
+        points = [list(current_position)]
+        points.extend(self._circle_points(target_position, radius, turns=1, count=24))
+        return points
+
+    def _post_support_points(
+        self,
+        current_position: Vector3,
+        target_position: Vector3,
+        constraints: Dict[str, Any],
+    ) -> List[List[float]]:
+        radius = max(float(constraints["approach_range"]) + 60.0, 120.0)
+        center = self._offset_from_target(target_position, current_position, radius)
+        z = target_position[2]
+        loiter = [
+            center,
+            [center[0] + 50.0, center[1], z],
+            [center[0], center[1] + 50.0, z],
+            [center[0] - 50.0, center[1], z],
+            [center[0], center[1] - 50.0, z],
+            center,
+        ]
+        return [list(current_position)] + [self._clip_world_position(point) for point in loiter]
+
+    def _post_strike_request_points(
+        self,
+        current_position: Vector3,
+        target_position: Vector3,
+        constraints: Dict[str, Any],
+    ) -> List[List[float]]:
+        standoff = max(float(constraints["approach_range"]) * 2.0, 120.0)
+        hold = self._offset_from_target(target_position, current_position, standoff)
+        marker = self._offset_from_target(target_position, hold, max(float(constraints["approach_range"]), 60.0))
+        return [list(current_position), self._clip_world_position(hold), self._clip_world_position(marker)]
+
+    def _circle_points(self, center: Vector3, radius: float, turns: int, count: int) -> List[List[float]]:
+        points: List[List[float]] = []
+        total = max(1, turns * count)
+        for index in range(total + 1):
+            angle = 2.0 * math.pi * index / count
+            points.append(
+                self._clip_world_position(
+                    [
+                        center[0] + math.cos(angle) * radius,
+                        center[1] + math.sin(angle) * radius,
+                        center[2],
+                    ]
+                )
+            )
+        return points
+
+    def _offset_from_target(self, target: Vector3, reference: Vector3, distance: float) -> List[float]:
+        dx = reference[0] - target[0]
+        dy = reference[1] - target[1]
+        length = math.hypot(dx, dy) or 1.0
+        return [
+            target[0] + dx / length * distance,
+            target[1] + dy / length * distance,
+            target[2],
+        ]
+
+    def _clip_world_position(self, point: Sequence[float]) -> List[float]:
+        return [
+            max(WORLD_MIN, min(WORLD_MAX, float(point[0]))),
+            max(WORLD_MIN, min(WORLD_MAX, float(point[1]))),
+            float(point[2]) if len(point) > 2 else DEFAULT_INTERACTIVE_START[2],
+        ]
 
     def _bearing_observation(
         self,
@@ -650,6 +1051,14 @@ class SimulationRunner:
                 ),
                 "deep_target_threshold": DEEP_TARGET_THRESHOLD_M,
                 "deep_target_extra_orbit_turns": DEEP_TARGET_EXTRA_ORBIT_TURNS,
+                "sonar_trigger_range": float(payload.get("sonar_trigger_range", DEFAULT_SONAR_TRIGGER_RANGE_M)),
+                "sonar_max_range": float(payload.get("sonar_max_range", DEFAULT_SONAR_MAX_RANGE_M)),
+                "engagement_depth_min": float(
+                    payload.get("engagement_depth_min", DEFAULT_ENGAGEMENT_DEPTH_MIN_M)
+                ),
+                "engagement_depth_max": float(
+                    payload.get("engagement_depth_max", DEFAULT_ENGAGEMENT_DEPTH_MAX_M)
+                ),
             }
         )
         constraints["approach_range"] = max(0.0, constraints["approach_range"])
@@ -658,7 +1067,151 @@ class SimulationRunner:
         constraints["max_iterations"] = max(1, constraints["max_iterations"])
         constraints["default_step"] = max(1.0, constraints["default_step"])
         constraints["false_bearing_threshold"] = max(0.0, constraints["false_bearing_threshold"])
+        constraints["sonar_trigger_range"] = max(0.0, constraints["sonar_trigger_range"])
+        constraints["sonar_max_range"] = max(0.1, constraints["sonar_max_range"])
+        constraints["engagement_depth_min"] = max(0.0, constraints["engagement_depth_min"])
+        constraints["engagement_depth_max"] = max(
+            constraints["engagement_depth_min"],
+            constraints["engagement_depth_max"],
+        )
         return constraints
+
+    def _target_profiles(self, payload: Dict[str, Any], target_count: int) -> List[Dict[str, Any]]:
+        profiles = payload.get("target_profiles", [])
+        if not isinstance(profiles, Sequence) or isinstance(profiles, (str, bytes, bytearray)):
+            profiles = []
+        has_explicit_profiles = bool(profiles)
+        normalized: List[Dict[str, Any]] = []
+        for index in range(target_count):
+            raw = profiles[index] if index < len(profiles) and isinstance(profiles[index], dict) else {}
+            default_type = "unknown" if has_explicit_profiles else "ship"
+            target_type = str(raw.get("target_type", raw.get("type", default_type))).strip().lower()
+            if target_type not in TARGET_TYPES:
+                target_type = "unknown"
+            normalized.append(
+                {
+                    "target_type": target_type,
+                    "target_heading_deg": float(raw.get("target_heading_deg", raw.get("heading", 0.0))) % 360.0,
+                    "is_blue_target": _truthy(raw.get("is_blue_target", raw.get("blue", False))),
+                    "iff_explicit": bool(
+                        has_explicit_profiles and ("is_blue_target" in raw or "blue" in raw)
+                    ),
+                }
+            )
+        return normalized
+
+    def _sonar_event_if_available(
+        self,
+        *,
+        uuv_position: Vector3,
+        target_position: Vector3,
+        target_profile: Dict[str, Any],
+        constraints: Dict[str, Any],
+        iteration: int,
+        target_index: int,
+        target_sequence: int,
+    ) -> Optional[Dict[str, Any]]:
+        trigger_range = float(constraints.get("sonar_trigger_range", DEFAULT_SONAR_TRIGGER_RANGE_M))
+        if _horizontal_distance(uuv_position, target_position) > trigger_range:
+            return None
+        return self._sonar_event(
+            uuv_position=uuv_position,
+            target_position=target_position,
+            target_profile=target_profile,
+            constraints=constraints,
+            iteration=iteration,
+            target_index=target_index,
+            target_sequence=target_sequence,
+        )
+
+    def _sonar_event_for_inspection(
+        self,
+        *,
+        current_position: Vector3,
+        target_position: Vector3,
+        target_profile: Dict[str, Any],
+        constraints: Dict[str, Any],
+        iteration: int,
+        target_index: int,
+        target_sequence: int,
+    ) -> Optional[Dict[str, Any]]:
+        trigger_range = float(constraints.get("sonar_trigger_range", DEFAULT_SONAR_TRIGGER_RANGE_M))
+        if trigger_range <= 0.0:
+            return None
+        max_range = float(constraints.get("sonar_max_range", DEFAULT_SONAR_MAX_RANGE_M))
+        current_range = _horizontal_distance(current_position, target_position)
+        if current_range <= trigger_range:
+            imaging_position = current_position
+        else:
+            clear_standoff = max(0.1, max_range * 0.75)
+            orbit_radius = max(0.0, float(constraints.get("orbit_radius", clear_standoff)))
+            standoff = min(clear_standoff, orbit_radius if orbit_radius > 0.0 else clear_standoff)
+            imaging_position = vector3(self._offset_from_target(target_position, current_position, standoff))
+        return self._sonar_event(
+            uuv_position=imaging_position,
+            target_position=target_position,
+            target_profile=target_profile,
+            constraints=constraints,
+            iteration=iteration,
+            target_index=target_index,
+            target_sequence=target_sequence,
+        )
+
+    def _sonar_event(
+        self,
+        *,
+        uuv_position: Vector3,
+        target_position: Vector3,
+        target_profile: Dict[str, Any],
+        constraints: Dict[str, Any],
+        iteration: int,
+        target_index: int,
+        target_sequence: int,
+    ) -> Dict[str, Any]:
+        sonar_params = {
+            "max_range_m": float(constraints.get("sonar_max_range", DEFAULT_SONAR_MAX_RANGE_M)),
+            "uuv_heading_deg": bearing_from_to(uuv_position, target_position),
+        }
+        sonar_output = generate_sonar_image(
+            uuv_position=tuple(uuv_position),
+            target_position=tuple(target_position),
+            target_type=str(target_profile["target_type"]),
+            target_heading_deg=float(target_profile["target_heading_deg"]),
+            sonar_params=sonar_params,
+        )
+        recognition = recognize_target(sonar_output, {"clear_range_m": 8.0})
+        recognition["is_blue_target"] = bool(target_profile["is_blue_target"])
+        recognition["target_depth_m"] = sonar_output["target_depth_m"]
+        recognition["iff_source"] = "scenario_gt"
+        return {
+            "iteration": iteration,
+            "target_index": target_index,
+            "target_sequence": target_sequence,
+            "uuv_position": [round(value, 3) for value in uuv_position],
+            "target_position": [round(value, 3) for value in target_position],
+            "target_type_truth": target_profile["target_type"],
+            "target_heading_deg": round(float(target_profile["target_heading_deg"]), 3),
+            "is_blue_target_truth": bool(target_profile["is_blue_target"]),
+            "target_range_m": sonar_output["target_range_m"],
+            "target_bearing_deg": sonar_output["target_bearing_deg"],
+            "target_depth_m": sonar_output["target_depth_m"],
+            "sector_center_deg": sonar_output["sector_center_deg"],
+            "sector_width_deg": sonar_output["sector_width_deg"],
+            "max_range_m": sonar_output["max_range_m"],
+            "echo_strength": sonar_output["echo_strength"],
+            "image_shape": list(sonar_output["image"].shape),
+            "image_rgb": sonar_output["image"].tolist(),
+            "recognition": recognition,
+        }
+
+    def _should_exclude_by_sonar(self, recognition: Optional[Dict[str, Any]], event: Dict[str, Any]) -> bool:
+        if not recognition:
+            return False
+        if recognition.get("is_real_target"):
+            return False
+        if float(event.get("echo_strength", 0.0)) <= 0.0:
+            return False
+        return float(event.get("target_range_m", 999.0)) <= float(event.get("max_range_m", DEFAULT_SONAR_MAX_RANGE_M))
 
     def _interactive_start_position(self, payload: Dict[str, Any]) -> Vector3:
         if payload.get("allow_start_override"):
@@ -906,6 +1459,8 @@ class SimulationRunner:
         feedback_note: str,
         target_discovered: bool = False,
         discovered_position: Optional[Vector3] = None,
+        sonar_recognition: Optional[Dict[str, Any]] = None,
+        target_excluded: bool = False,
     ) -> Dict[str, Any]:
         record = {
             "iteration": iteration,
@@ -919,6 +1474,10 @@ class SimulationRunner:
             "feedback": feedback_note,
             "target_discovered": target_discovered,
         }
+        if sonar_recognition is not None:
+            record["sonar_recognition"] = sonar_recognition
+        if target_excluded:
+            record["target_excluded"] = True
         if target_discovered and discovered_position is not None:
             record["discovered_position"] = [round(value, 3) for value in discovered_position]
         if target_index is not None:
@@ -1078,6 +1637,28 @@ def parse_target_positions(values: Any) -> List[Vector3]:
         return _validate_world_positions(positions)
 
     raise ValueError("请输入至少一个真实目标坐标")
+
+
+def _polyline_distance(points: Sequence[Sequence[float]]) -> float:
+    distance = 0.0
+    for index in range(1, len(points)):
+        previous = points[index - 1]
+        current = points[index]
+        distance += math.hypot(float(current[0]) - float(previous[0]), float(current[1]) - float(previous[1]))
+    return distance
+
+
+def _horizontal_distance(origin: Sequence[float], target: Sequence[float]) -> float:
+    return math.hypot(float(target[0]) - float(origin[0]), float(target[1]) - float(origin[1]))
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    return text in {"1", "true", "yes", "y", "blue", "enemy", "蓝", "蓝方", "敌", "敌方"}
 
 
 def _json_positions(text: str) -> List[Vector3]:
